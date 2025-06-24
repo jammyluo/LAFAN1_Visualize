@@ -49,7 +49,47 @@ class MotionPlayer:
         self.args = args
         if self.args.robot_type == 'g1':
             urdf_path = "robot_description/g1/g1_29dof_rev_1_0.urdf"
-            self.robot = pin.RobotWrapper.BuildFromURDF('robot_description/g1/g1_29dof_rev_1_0.urdf', 'robot_description/g1', pin.JointModelFreeFlyer())
+            
+            # 修复：使用正确的工作目录来加载 URDF
+            current_dir = os.getcwd()
+            urdf_full_path = os.path.join(current_dir, urdf_path)
+            package_dir = os.path.join(current_dir, "robot_description/g1")
+            
+            # 确保路径存在
+            if not os.path.exists(urdf_full_path):
+                raise FileNotFoundError(f"URDF file not found: {urdf_full_path}")
+            if not os.path.exists(package_dir):
+                raise FileNotFoundError(f"Package directory not found: {package_dir}")
+                
+            print(f"Loading URDF from: {urdf_full_path}")
+            print(f"Package directory: {package_dir}")
+            
+            # 方法1：尝试使用绝对路径
+            try:
+                self.robot = pin.RobotWrapper.BuildFromURDF(urdf_full_path, package_dir, pin.JointModelFreeFlyer())
+                print("✓ URDF 加载成功 (方法1)")
+            except Exception as e:
+                print(f"方法1失败: {e}")
+                
+                # 方法2：修改工作目录
+                try:
+                    print("尝试方法2：修改工作目录...")
+                    original_cwd = os.getcwd()
+                    os.chdir(package_dir)
+                    
+                    self.robot = pin.RobotWrapper.BuildFromURDF("g1_29dof_rev_1_0.urdf", ".", pin.JointModelFreeFlyer())
+                    print("✓ URDF 加载成功 (方法2)")
+                    
+                    # 恢复工作目录
+                    os.chdir(original_cwd)
+                    
+                except Exception as e2:
+                    print(f"方法2失败: {e2}")
+                    # 恢复工作目录
+                    if 'original_cwd' in locals():
+                        os.chdir(original_cwd)
+                    raise Exception(f"无法加载 URDF: {e2}")
+            
             self.Tpose = np.array([0,0,0.785,0,0,0,1,
                                     -0.15,0,0,0.3,-0.15,0,
                                     -0.15,0,0,0.3,-0.15,0,
@@ -142,12 +182,41 @@ class MotionPlayer:
         root_rot_all = []
         rot_vec_all = []
         
-        max_motion_length = 400  # motion_data.shape[0]
+        max_motion_length = motion_data.shape[0]  # 使用实际的数据长度
+        fps = 30.0
+        
+        # 计算开始和结束帧
+        start_time = getattr(self.args, 'start_time', 0.0)  # 默认从0秒开始
+        end_time = getattr(self.args, 'end_time', None)     # 默认到结束
+        
+        start_frame = int(start_time * fps)
+        if end_time is not None:
+            end_frame = int(end_time * fps)
+        else:
+            end_frame = max_motion_length
+        
+        # 确保帧数在有效范围内
+        start_frame = max(0, min(start_frame, max_motion_length - 1))
+        end_frame = max(start_frame + 1, min(end_frame, max_motion_length))
+        
+        print(f"=== 动画播放信息 ===")
+        print(f"原始数据帧数: {max_motion_length}")
+        print(f"指定开始时间: {start_time:.2f}s (帧 {start_frame})")
+        print(f"指定结束时间: {end_time if end_time else '结束'}s (帧 {end_frame})")
+        print(f"实际播放帧数: {end_frame - start_frame}")
+        print(f"播放时间: {(end_frame - start_frame) / fps:.2f} 秒")
+        print(f"==================")
+        
         # main loop
         while not self.gym.query_viewer_has_closed(self.viewer):
-            for frame_nr in range(80, max_motion_length):
+            for frame_nr in range(start_frame, end_frame):
                 start_time = time.time()
                 configuration = torch.from_numpy(motion_data[frame_nr, :])
+                
+                # 打印当前帧信息（每100帧打印一次）
+                if frame_nr % 100 == 0:
+                    current_time = frame_nr / fps
+                    print(f"当前帧: {frame_nr}/{end_frame} ({frame_nr/end_frame*100:.1f}%) - 时间: {current_time:.2f}s")
                 
                 # root_trans, root_rot, rot_vec = self.get_key_point(motion_data[frame_nr, :])
                 
@@ -202,7 +271,25 @@ class MotionPlayer:
         file_name = self.args.file_name
         robot_type = self.args.robot_type
         csv_files = robot_type + '/' + file_name + '.csv'
+        
+        # 检查文件是否存在
+        if not os.path.exists(csv_files):
+            raise FileNotFoundError(f"CSV file not found: {csv_files}")
+        
         data = np.genfromtxt(csv_files, delimiter=',')
+        
+        # 打印文件信息
+        print(f"=== CSV 文件信息 ===")
+        print(f"文件路径: {csv_files}")
+        print(f"数据形状: {data.shape}")
+        print(f"总帧数: {data.shape[0]}")
+        
+        # 计算时间长度（假设 30 FPS）
+        fps = 30.0
+        total_time = data.shape[0] / fps
+        print(f"时间长度: {total_time:.2f} 秒 ({total_time/60:.2f} 分钟)")
+        print(f"帧率: {fps} FPS")
+        print(f"==================")
         
         return data
     
@@ -272,9 +359,20 @@ class MotionPlayer:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--file_name', type=str, help="File name", default='walk1_subject1')
+    parser.add_argument('--file_name', type=str, help="File name", default='c')
     parser.add_argument('--robot_type', type=str, help="Robot type", default='g1')
+    parser.add_argument('--start_time', type=float, default=0.0, 
+                       help="开始时间（秒），默认从0秒开始")
+    parser.add_argument('--end_time', type=float, default=None, 
+                       help="结束时间（秒），默认到文件结束")
     args = parser.parse_args()
+    
+    print(f"=== 转换参数 ===")
+    print(f"文件名称: {args.file_name}")
+    print(f"机器人类型: {args.robot_type}")
+    print(f"开始时间: {args.start_time}s")
+    print(f"结束时间: {args.end_time if args.end_time else '文件结束'}s")
+    print(f"================")
     
     loader = MotionPlayer(args)
     loader.run_viewer()
